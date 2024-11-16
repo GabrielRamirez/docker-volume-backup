@@ -1,0 +1,333 @@
+#!/bin/bash
+
+# Constants
+DEFAULT_LOG_DIR="/var/log/dockup"
+DATE=$(date +"%Y-%m-%d_%H-%M-%S")
+LOG_FILE=""
+ENABLE_LOGS=false
+ENABLE_VERBOSE=false
+VERSION="1.7.5"
+BACKUP_DIR=""
+RESTORE_FILE=""
+COMMAND=""
+SUBCOMMAND=""
+INCLUDE_ANONYMOUS=false
+NAMED_VOLUMES=()
+
+COLOR_GREEN=$(tput setaf 2)   # Green for commands and success
+COLOR_YELLOW=$(tput setaf 3)  # Yellow for headings
+COLOR_CYAN=$(tput setaf 6)    # Cyan for command categories and options
+COLOR_RESET=$(tput sgr0)      # Reset color to default
+COLOR_RED=$(tput setaf 1)
+COLOR_BLUE=$(tput setaf 4)
+
+# Logging functions
+log_info() {
+    echo "$(date) [INFO] $1" >&2
+    if [ "$ENABLE_VERBOSE" = true ]; then
+        echo "$(date) [INFO] $1" >> "$LOG_FILE"
+    fi
+}
+
+log_error() {
+    echo "$(date) [ERROR] ${COLOR_RED}$1${COLOR_RESET}" >&2
+    if [ "$ENABLE_VERBOSE" = true ]; then
+        echo "$(date) [ERROR] $1" >> "$LOG_FILE"
+    fi
+}
+
+log_success() {
+    echo "$(date) [SUCCESS] ${COLOR_GREEN}$1${COLOR_RESET}" >&2
+    if [ "$ENABLE_VERBOSE" = true ]; then
+        echo "$(date) [SUCCESS] $1" >> "$LOG_FILE"
+    fi
+}
+
+# Validate the backup directory
+validate_backup_dir() {
+    if [ -z "$BACKUP_DIR" ]; then
+        log_error "Error: Backup directory is not set. Use --backup-dir=<path> to specify it."
+        exit 1
+    fi
+
+    if [ ! -d "$BACKUP_DIR" ]; then
+        log_error "Error: The specified backup directory does not exist: $BACKUP_DIR"
+        exit 1
+    fi
+
+    if [ ! -w "$BACKUP_DIR" ]; then
+        log_error "Error: The specified backup directory is not writable: $BACKUP_DIR"
+        exit 1
+    fi
+
+    log_success "Backup directory is valid: $BACKUP_DIR"
+}
+
+# Show help message with color-coded sections
+show_help() {
+    echo -e "${COLOR_YELLOW}Usage:${COLOR_RESET} $0 [command] [options]"
+    echo
+    echo -e "${COLOR_CYAN}Commands:${COLOR_RESET}"
+    echo "  ${COLOR_GREEN}backup${COLOR_RESET}       Backup Docker volumes."
+    echo "  ${COLOR_GREEN}list${COLOR_RESET}         List Docker volumes."
+    echo "  ${COLOR_GREEN}restore${COLOR_RESET}      Restore a Docker volume from a backup."
+    echo
+    echo -e "${COLOR_CYAN}Options for 'backup':${COLOR_RESET}"
+    echo "  ${COLOR_GREEN}-a${COLOR_RESET}                    Backup all volumes."
+    echo "  ${COLOR_GREEN}-name <volumes>${COLOR_RESET}        Backup specific volumes (comma separated)."
+    echo "  ${COLOR_GREEN}--backup-dir=<path>${COLOR_RESET}    Specify the backup directory."
+    echo "  ${COLOR_GREEN}--include-anonymous${COLOR_RESET}    Include anonymous volumes in backup."
+    echo
+    echo -e "${COLOR_CYAN}Options for 'restore':${COLOR_RESET}"
+    echo "  ${COLOR_GREEN}--restore-file=<path>${COLOR_RESET}  Specify the backup file to restore from."
+    echo "  ${COLOR_GREEN}-name <volume>${COLOR_RESET}         Specify the volume to restore. You can only restore one volume at a time."
+    echo
+    echo -e "${COLOR_CYAN}Options for logging:${COLOR_RESET}"
+    echo "  ${COLOR_GREEN}--log-file=<path>${COLOR_RESET}      Specify the log file."
+    echo "  ${COLOR_GREEN}--enable-logs${COLOR_RESET}          Enable logging."
+    echo "  ${COLOR_GREEN}--verbose${COLOR_RESET}              Enable verbose logging."
+    echo
+    echo -e "${COLOR_CYAN}Other options:${COLOR_RESET}"
+    echo "  ${COLOR_GREEN}--version${COLOR_RESET}              Show the version."
+    echo "  ${COLOR_GREEN}--help${COLOR_RESET}                 Show this help message."
+    echo
+    echo -e "${COLOR_YELLOW}Example usage:${COLOR_RESET}"
+    echo "  Backup all volumes to a specified directory:"
+    echo "    $0 ${COLOR_GREEN}backup${COLOR_RESET} ${COLOR_GREEN}-a${COLOR_RESET} --backup-dir=/path/to/backup"
+    echo
+    echo "  Backup specific volumes (e.g., volume1, volume2):"
+    echo "    $0 ${COLOR_GREEN}backup${COLOR_RESET} ${COLOR_GREEN}-name${COLOR_RESET} volume1,volume2 --backup-dir=/path/to/backup"
+    echo
+    echo "  List all Docker volumes:"
+    echo "    $0 ${COLOR_GREEN}list${COLOR_RESET}"
+    echo
+    echo "  Restore a volume from a backup:"
+    echo "    $0 ${COLOR_GREEN}restore${COLOR_RESET} --restore-file=/path/to/restore.tar.gz -name volume1"
+}
+
+
+# Parse the command-line arguments
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            backup|list|restore)
+                COMMAND="$1"
+                ;;
+            -a)
+                SUBCOMMAND="-a"
+                ;;
+            -name)
+                shift
+                if [[ -n "$1" ]]; then
+                    IFS=',' read -r -a NAMED_VOLUMES <<< "$1"
+                    SUBCOMMAND="-name"
+                else
+                    log_error "No volumes specified. Use -name <volume1,volume2> to specify volumes."
+                    exit 1
+                fi
+                ;;
+            --backup-dir=* )
+                BACKUP_DIR="${1#*=}"
+                log_info "Parsed backup directory: $BACKUP_DIR"
+                ;;
+            --restore-file=* )
+                RESTORE_FILE="${1#*=}"
+                log_info "Parsed restore file: $RESTORE_FILE"
+                ;;
+            --include-anonymous)
+                INCLUDE_ANONYMOUS=true
+                log_info "Including anonymous volumes in the operation."
+                ;;
+            --log-file=* )
+                LOG_FILE="${1#*=}"
+                ;;
+            --enable-logs)
+                ENABLE_LOGS=true
+                LOG_FILE="${LOG_FILE:-$DEFAULT_LOG_DIR/dockup-${DATE}.log}"
+                mkdir -p "$(dirname "$LOG_FILE")"
+                ;;
+            --verbose)
+                ENABLE_VERBOSE=true
+                ;;
+            --help)
+                show_help
+                exit 0
+                ;;
+            --version)
+                log_info "dockup version $VERSION"
+                exit 0
+                ;;
+            *)
+                log_error "Invalid argument: $1"
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    if [ -z "$COMMAND" ]; then
+        log_error "No command provided. Use --help for usage information."
+        exit 1
+    fi
+
+    if [[ "$COMMAND" == "backup" ]] && [ -z "$SUBCOMMAND" ]; then
+        log_error "No backup option provided (e.g., -a or -name). Use --help for usage information."
+        exit 1
+    fi
+}
+
+# List all volumes, optionally filtering out anonymous
+list_volumes() {
+    docker volume ls --format "{{.Name}}" 2>/dev/null | grep -E '^[a-zA-Z0-9_.-]+$' | while read -r volume; do
+        if [ "$INCLUDE_ANONYMOUS" = true ] || [[ ! "$volume" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "$volume"
+            log_info "Volume to be processed: $volume"
+        fi
+    done
+}
+
+# Backup a single volume
+backup_volume() {
+    local volume=$1
+
+    if [ -z "$volume" ]; then
+        log_error "Empty or invalid volume name detected. Skipping."
+        return 1
+    fi
+
+    log_info "Processing volume: $volume"
+
+    local date_folder=$(date +"%Y-%m-%d")
+    local archive_dir="${BACKUP_DIR%/}/$date_folder"
+    local archive_file="$archive_dir/${volume}_backup.tar.gz"
+
+    log_info "Preparing to back up volume: $volume"
+    log_info "Archive directory: $archive_dir"
+    log_info "Archive file: $archive_file"
+
+    mkdir -p "$archive_dir" || {
+        log_error "Failed to create archive directory: $archive_dir"
+        return 1
+    }
+
+    docker run --rm -v "$volume":/data -v "$archive_dir":/backup \
+        alpine tar czf /backup/${volume}_backup.tar.gz -C /data . || {
+            log_error "Failed to back up volume: $volume"
+            return 1
+        }
+
+    if tar -tzf "$archive_file" > /dev/null 2>&1; then
+        log_success "Successfully backed up and validated volume: $volume"
+    else
+        log_error "Backup validation failed for volume: $volume"
+        rm -f "$archive_file"
+        return 1
+    fi
+}
+
+# Restore a single volume with stopping and starting the container
+restore_volume() {
+    local volume=$1
+    local backup_file=$2
+
+    if [ -z "$volume" ] || [ -z "$backup_file" ]; then
+        log_error "Missing arguments: volume or backup file."
+        return 1
+    fi
+
+    log_info "Restoring volume: $volume from file: $backup_file"
+
+    # Check if any container is using the volume
+    container=$(docker ps -q --filter "volume=$volume")
+
+    if [ -n "$container" ]; then
+        log_info "Stopping container using volume $volume..."
+        docker stop "$container" || {
+            log_error "Failed to stop container using volume: $volume"
+            return 1
+        }
+    else
+        log_info "No container is currently using volume $volume."
+    fi
+
+    # Proceed with the restore
+    docker run --rm -v "$volume":/data -v "$(dirname "$backup_file")":/backup \
+        alpine sh -c "tar xzf /backup/$(basename "$backup_file") -C /data" || {
+            log_error "Failed to restore volume: $volume"
+            return 1
+        }
+
+    log_success "Successfully restored volume: $volume"
+
+    # Restart the container if it was stopped
+    if [ -n "$container" ]; then
+        log_info "Starting container using volume $volume..."
+        docker start "$container" || {
+            log_error "Failed to restart container using volume: $volume"
+            return 1
+        }
+        log_success "Container using volume $volume restarted successfully."
+    fi
+}
+
+# Main function
+main() {
+    # Show help if no arguments are provided
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 0
+    fi
+
+    # Parse the command-line arguments
+    parse_arguments "$@"
+
+    # Handle each command (backup, list, restore)
+    case "$COMMAND" in
+        backup)
+            validate_backup_dir
+            if [ "$SUBCOMMAND" == "-a" ]; then
+                list_volumes | while read -r volume; do
+                    backup_volume "$volume"
+                done
+            elif [ "$SUBCOMMAND" == "-name" ]; then
+                for volume in "${NAMED_VOLUMES[@]}"; do
+                    backup_volume "$volume"
+                done
+            fi
+            ;;
+        list)
+            list_volumes
+            ;;
+        restore)
+            if [ -z "$RESTORE_FILE" ]; then
+                log_error "Restore file not specified. Use --restore-file=<path>."
+                exit 1
+            fi
+
+            if [ ! -f "$RESTORE_FILE" ]; then
+                log_error "Backup file $RESTORE_FILE does not exist."
+                exit 1
+            fi
+
+            if [ -z "$NAMED_VOLUMES" ]; then
+                log_error "No volume specified for restore. Use -name <volume_name>."
+                exit 1
+            fi
+
+            if [ ${#NAMED_VOLUMES[@]} -gt 1 ]; then
+                log_error "Only one volume can be restored at a time. Provide exactly one volume name."
+                exit 1
+            fi
+
+            log_info "Restore operation will restore the volume: ${NAMED_VOLUMES[0]} from backup file: $RESTORE_FILE"
+            restore_volume "${NAMED_VOLUMES[0]}" "$RESTORE_FILE"
+            ;;
+        *)
+            log_error "Unknown command: $COMMAND"
+            exit 1
+            ;;
+    esac
+}
+
+# Execute the main function
+main "$@"
